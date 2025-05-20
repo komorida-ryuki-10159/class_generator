@@ -1,6 +1,6 @@
 import { stdin as input, stdout as output } from "node:process";
 import * as readline from "node:readline";
-import fs from 'fs/promises';
+import fs from 'node:fs';
 
 type AccessModifier = 'public' | 'private' | 'protected' | 'package';
 
@@ -8,13 +8,14 @@ interface PhpClass {
   name: string;
   extends?: string;
   implements?: string[];
-  fields: (PhpClassMethod | PhpClassProperty)[];
+  fields: (PhpClassMethod | PhpClassProperty | PhpClassUse)[];
 }
 
 interface PhpClassProperty {
   accessModifier?: AccessModifier;
   name: string;
   type: string;
+  val?: string;
   description?: string;
 }
 
@@ -29,39 +30,47 @@ interface PhpClassMethod {
   description?: string;
 }
 
+interface PhpClassUse {
+  name: string;
+}
+
 function codeGenerator(c: PhpClass) {
-  let code: {
-    use: string[]
-    class: string;
-  } = {
-    use: [],
-    class: `class ${c.name}`
-  };
+  let code = `class ${c.name}`;
 
   if (c.extends) {
-    code.use.push(`use ${c.extends};`);
-    code.class += ` extends ${c.extends.split('/').slice(-1)[0]}`
+    code += ` extends ${c.extends.split('/').slice(-1)[0]}`
   } else if (c.implements) {
-    code.use.push(...c.implements.map(
-      c => `use ${c};`
-    ));
-    code.class += ` implements ${c.implements.map(v => v.split('/').slice(-1)[0]).join(', ')}`
+    code += ` implements ${c.implements.map(v => v.split('/').slice(-1)[0]).join(', ')}`
   }
 
   if (c.fields.length) {
-    code.class += `\n{\n`;
+    code += `\n{\n`;
 
     for (const field of c.fields) {
-      code.class += `  ${field.accessModifier} ${field.name}`
-      code.class += 'args' in field
-        ? `(${field.args.map(arg => `${arg.type} ${arg.name}`)}): ${field.type} {}`
-        : `: ${field.type}`;
+      if (!('accessModifier' in field)) {
+        code += `  use ${field.name}`;
+      } else {
+        if ('args' in field) {
+          code += `  ${field.accessModifier} ${field.name}`
+          code += `(${field.args.map(arg => `${arg.type} ${arg.name}`)}): ${field.type} {}`
+        } else {
+          code += `  ${field.accessModifier} ${field.name.startsWith('$') ? field.name : ('$' + field.name)}`
+        }
+
+        if (field.type)
+          code += `: ${field.type}`;
+
+        if ('val' in field && field.val)
+          code += ` = ${field.val}`
+      }
+
+      code += ';\n'
     }
 
-    code.class += `\n}\n`;
+    code += `\n}\n`;
   }
 
-  return `${code.use.join('\n')}\n\n${code.class}`;
+  return code;
 }
 
 class ReadLine {
@@ -78,42 +87,62 @@ class ReadLine {
 }
 
 async function main() {
-  const rl = new ReadLine();
+  const path = await new ReadLine().question('file name > ');
 
-  const name = await rl.question('class name > ');
-  const fields: (PhpClassMethod | PhpClassProperty)[] = await rl
-    .question('csv file path >')
-    .then(async path => await fs.readFile(path, 'utf-8'))
-    .then(file => file.split('\n').map(row => {
-      const [name, accessModifier, type, description] = <[string, AccessModifier, string, string | undefined]>row.split(',');
-      const args = name
-        .match(/\(([^)]*)\)/)?.[1]
-        ?.split(',')
-        .filter(arg => arg.length > 0)
-        .map(arg => {
-          const [type, name] = arg.split(/\s+/);
-          return { name, type };
+  if (fs.existsSync('dist'))
+    fs.rmSync('dist', { recursive: true });
+
+  fs.mkdirSync('dist');
+
+  const file = fs.readFileSync(path, 'utf-8');
+  const defs = file.match(/#\s.*/g)?.filter(Boolean) ?? [];
+
+  file
+    .split('\n')
+    .map(l => l.trim())
+    .reduce<string[]>((acc, l) => {
+      if (defs.includes(l))
+        acc.unshift(l)
+      else
+        acc[0] += '\n' + l;
+
+      return acc;
+    }, [])
+    .forEach((doc) => {
+      const lines = doc.split('\n').map(l => l.trim()).filter(l => l !== '');
+      const className = lines
+        .at(0)
+        ?.match(/\{.*\}/g)
+        ?.at(0)
+        ?.replace('{', '')
+        .replace('}', '')
+        .split('_')
+        .map(t => t[0].toUpperCase() + t.slice(1))
+        .join('');
+
+      const fillable = JSON.stringify(lines
+        .filter(l => l.startsWith('|') && l.endsWith('|'))
+        .slice(2)
+        .map(p => p.split('|').filter(r => r !== ''))
+        .filter(([_, name]) => name != 'id' && name != 'updated_at' && name != 'created_at' && !name.match(/.*_id/))
+        .map(([_, name]) => name))
+
+      if (className) {
+        const code = codeGenerator({
+          name: className,
+          extends: 'Model',
+          fields: [
+            { name: 'HasFactory' },
+            { name: 'fillable', accessModifier: 'protected', val: fillable }
+          ]
         });
 
-      return args
-        ? { name: name.replace(/\(.*\)/g, ''), accessModifier, type, args, description }
-        : { name, accessModifier, type, description }
-    }));
-  const impl = await rl
-    .question('implements (none)> ')
-    .then(s => s.trim() === 'none' ? undefined : s.split(''));
-  const exten = await rl
-    .question('extends (none)> ')
-    .then(s => s.trim() === 'none' ? undefined : s);
-
-  const code = codeGenerator({
-    name,
-    fields,
-    implements: impl,
-    extends: exten,
-  });
-
-  await fs.writeFile(`${name}.php`, code);
+        fs.writeFileSync(
+          `dist/${className}.php`,
+          `<?php\n\nnamespace App\Models;\n\nuse Illuminate\\Database\\Eloquent\\Factories\\HasFactory;\nuse Illuminate\\Database\\Eloquent\\Model;\n\n${code}`
+        );
+      }
+    });
 }
 
 main();
