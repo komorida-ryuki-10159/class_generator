@@ -75,6 +75,15 @@ function codeGenerator(c: PhpClass) {
 
 class ReadLine {
   private rl = readline.createInterface({ input, output });
+  public static async question(message: string) {
+    const r = new ReadLine();
+    const a = await r.question(message);
+
+    r.close();
+
+    return a;
+  }
+
   public question(message: string) {
     return new Promise<string>((resolve, reject) => {
       try {
@@ -84,10 +93,14 @@ class ReadLine {
       }
     });
   }
+
+  public close() {
+    this.rl.close()
+  }
 }
 
 async function main() {
-  const path = await new ReadLine().question('file name > ');
+  const path = await ReadLine.question('file name > ');
 
   if (fs.existsSync('dist'))
     fs.rmSync('dist', { recursive: true });
